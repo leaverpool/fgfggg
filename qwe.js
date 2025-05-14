@@ -1,54 +1,65 @@
-// --- Timestamp Overlay Functions ---
-function updateOldestTimestampButton() {
-  const overlay = timestampOverlayElement; if (!overlay) return;
-  const button = overlay.querySelector('#oldest-timestamp-button'); if (!button) return;
-  try {
-    let visibleTimestampedCount = 0, oldestTimestamp = Infinity;
-    document.querySelectorAll(CHAT_TAB_SELECTOR_ALL).forEach(tab => {
-      if (!tab.isConnected) return;
-      const chatId = getChatIdFromTab(tab);
-      const timestamp = scriptChatCounts[chatId]?.firstUnreadTimestamp;
-      if (chatId && timestamp > 0) { visibleTimestampedCount++; if(timestamp < oldestTimestamp) oldestTimestamp = timestamp; }
-    });
-    button.textContent = `Go to Oldest (${visibleTimestampedCount}) ${oldestTimestamp === Infinity ? '' : formatTimestamp(oldestTimestamp)}. Click to navigate.`;
-    button.disabled = false;
-  } catch(e) { logEvent('ERROR', 'Error updating oldest timestamp button', e); if(button) { button.textContent = 'Error updating'; button.disabled = false; } }
-}
-function goToOldestTimestampedChat() {
-  logEvent('INFO', '[GoToOldest] Go to Oldest button clicked.');
-  try {
-    const visibleTimestampedChats = [];
-    document.querySelectorAll(CHAT_TAB_SELECTOR_ALL).forEach(tab => { if (!tab.isConnected) return; const chatId = getChatIdFromTab(tab); const timestamp = scriptChatCounts[chatId]?.firstUnreadTimestamp; if (chatId && timestamp !== null && timestamp > 0) { visibleTimestampedChats.push({ chatId, timestamp, element: tab }); } });
-    let targetElement = null; let targetChatId = null;
-    if (visibleTimestampedChats.length > 0) { visibleTimestampedChats.sort((a, b) => a.timestamp - b.timestamp); targetChatId = visibleTimestampedChats[0].chatId; targetElement = visibleTimestampedChats[0].element; logEvent('INFO', `[GoToOldest] Found ${visibleTimestampedChats.length} visible timestamped chats. Oldest: ${targetChatId} @ ${new Date(visibleTimestampedChats[0].timestamp).toLocaleTimeString()}`);
-    } else { logEvent('INFO', '[GoToOldest] No visible timestamped chats found. Falling back to NOC chat.'); targetChatId = NOC_CHAT_ID; document.querySelectorAll(CHAT_TAB_SELECTOR_ALL).forEach(tab => { const currentTabId = getChatIdFromTab(tab); if (currentTabId === NOC_CHAT_ID) { targetElement = tab; logEvent('INFO', `[GoToOldest] Found NOC chat element by ID:`, targetElement); } }); }
-    if (targetElement) { logEvent('INFO', `[GoToOldest] Activating and scrolling to target chat: ${targetChatId}.`); targetElement.style.outline="3px solid blue"; setTimeout(() => {if(targetElement)targetElement.style.outline="";}, 2000);
-      setTimeout(() => { if (targetElement && targetElement.isConnected) { if(typeof targetElement.click==='function'){targetElement.click();} targetElement.scrollIntoView({behavior:'smooth',block:'center'}); } else { logEvent('WARN', '[GoToOldest] Target tab disconnected.'); } }, 100);
-    } else { logEvent('WARN', `[GoToOldest] Could not find DOM element for target chat ID: ${targetChatId || 'N/A'}`); }
-  } catch (e) { logEvent('ERROR', '[GoToOldest] Error in goToOldestTimestampedChat', e); }
-}
-async function createTimestampOverlay() {
-  logEvent('INFO', 'Creating timestamp info overlay...'); if (document.getElementById('timestamp-overlay')) return;
-  try {
-    timestampOverlayElement = document.createElement('div'); timestampOverlayElement.id = 'timestamp-overlay';
-    const [savedX,savedY,savedW,savedH] = await Promise.all([GM_getValue(OVERLAY_POS_X_KEY,'10px'),GM_getValue(OVERLAY_POS_Y_KEY,'230px'),GM_getValue(OVERLAY_SIZE_W_KEY,overlayMinWidth),GM_getValue(OVERLAY_SIZE_H_KEY,overlayMinHeight)]);
-    Object.assign(timestampOverlayElement.style, {left:savedX, top:savedY, width:savedW, height:savedH});
-    const button = document.createElement('button'); button.id = 'oldest-timestamp-button'; button.textContent='Go to Oldest (0)'; button.title='Navigate to oldest script unread or NOC chat.';
-    button.addEventListener('click', goToOldestTimestampedChat); timestampOverlayElement.appendChild(button);
-    document.body.appendChild(timestampOverlayElement); makeOverlayDraggable(timestampOverlayElement);
-    if(typeof ResizeObserver==='function'){ if(!debouncedSaveOverlaySize){const saveSize=async(entry)=>{const target=entry.target;if(!target)return;try{await GM_setValue(OVERLAY_SIZE_W_KEY,target.style.width);await GM_setValue(OVERLAY_SIZE_H_KEY,target.style.height);}catch(err){}};debouncedSaveOverlaySize=typeof _!=='undefined'&&typeof _.debounce==='function'?_.debounce(saveSize,RESIZE_DEBOUNCE_MS):simpleDebounce(saveSize,RESIZE_DEBOUNCE_MS);} new ResizeObserver(entries=>{for(let entry of entries)if(debouncedSaveOverlaySize)debouncedSaveOverlaySize(entry);}).observe(timestampOverlayElement);
-    } else { logEvent('WARN', 'ResizeObserver not available.'); } updateOldestTimestampButton();
-  } catch (error) { logEvent('ERROR', 'Failed to create timestamp overlay', error); timestampOverlayElement = null; }
-}
-function makeOverlayDraggable(overlay) {
-  let offsetX, offsetY, isDragging = false; const MOUSE_DOWN_TARGET_SELECTOR = `#${overlay.id}`; const RESIZE_CORNER_THRESHOLD = 15;
-  try {
-    overlay.addEventListener('mousedown', async (e) => {
-      if (e.target.closest('button'))return; const cS=getComputedStyle(e.target).cursor; if(cS.includes('resize')||cS.includes('resizer'))return; const r=overlay.getBoundingClientRect(); if(e.clientY>=r.bottom-RESIZE_CORNER_THRESHOLD&&e.clientX>=r.right-RESIZE_CORNER_THRESHOLD)return; if(!e.target.matches(MOUSE_DOWN_TARGET_SELECTOR)&&!overlay.contains(e.target))return;
-      isDragging=true;offsetX=e.clientX-overlay.offsetLeft;offsetY=e.clientY-overlay.offsetTop;overlay.style.cursor='grabbing';overlay.style.userSelect='none';
-    });
-    document.addEventListener('mousemove',(e)=>{if(!isDragging)return;let nX=e.clientX-offsetX,nY=e.clientY-offsetY;const mX=window.innerWidth-overlay.offsetWidth,mY=window.innerHeight-overlay.offsetHeight;overlay.style.left=`${Math.max(0,Math.min(nX,mX))}px`;overlay.style.top=`${Math.max(0,Math.min(nY,mY))}px`;});
-    document.addEventListener('mouseup',async()=>{if(isDragging){isDragging=false;overlay.style.cursor='grab';overlay.style.userSelect='';try{await GM_setValue(OVERLAY_POS_X_KEY,overlay.style.left);await GM_setValue(OVERLAY_POS_Y_KEY,overlay.style.top);}catch(err){logEvent('ERROR','Draggable: Failed to save overlay position',err);}}else if(overlay.style.cursor!=='grab')overlay.style.cursor='grab';});
-    overlay.style.cursor='grab';
-  } catch (e) { logEvent('ERROR', 'Error setting up overlay dragging', e); }
-}
+// --- Constants and Configuration ---
+const SCRIPT_ID = 'RC-Combo-v6-5-15-debug-log-filter';
+const CC_CONSOLE_LOG_LEVEL = 'DEBUG'; // Set to 'DEBUG' for more verbose console logs
+const MAX_CHAT_RECORDS = 100;
+const RECENTLY_READ_THRESHOLD_MS = 1500;
+
+const SCRIPT_BADGE_COLOR = '#8A2BE2';
+const IGNORED_BADGE_COLOR = '#6c757d';
+const TOTAL_BADGE_COLOR = '#DC3545';
+const NATIVE_BADGE_COLOR = '#F9A825';
+const TIMESTAMP_BADGE_COLOR = '#28a745';
+const ELAPSED_BADGE_COLOR = '#4a4a4a';
+const CC_STORAGE_PREFIX = 'chatCounterCore_gm_';
+const CC_STORAGE_COUNTS = CC_STORAGE_PREFIX + 'counts_v6_3';
+const UI_VIS_PREFIX = 'ui_visibility_';
+const VIS_NATIVE_KEY = UI_VIS_PREFIX + 'native';
+const VIS_SCRIPT_KEY = UI_VIS_PREFIX + 'script';
+const VIS_TIMESTAMP_KEY = UI_VIS_PREFIX + 'timestamp';
+const VIS_ELAPSED_KEY = UI_VIS_PREFIX + 'elapsed';
+const VIS_IGNORED_KEY = UI_VIS_PREFIX + 'ignored_v1';
+const VIS_TOTAL_KEY = UI_VIS_PREFIX + 'total_v1';
+const OVERLAY_POS_X_KEY = 'timestampOverlay_posX';
+const OVERLAY_POS_Y_KEY = 'timestampOverlay_posY';
+const SORTER_COLLAPSED_KEY = 'sorter_ui_collapsed_v2';
+const OVERLAY_SIZE_W_KEY = 'timestampOverlay_sizeW_v1';
+const OVERLAY_SIZE_H_KEY = 'timestampOverlay_sizeH_v1';
+const RESIZE_DEBOUNCE_MS = 500;
+const CC_INJECTED_COUNTER_CLASS = 'rc-combo-injected-counter';
+const CC_TIMESTAMP_BADGE_CLASS = 'rc-combo-timestamp-badge';
+const CC_ELAPSED_BADGE_CLASS = 'rc-combo-elapsed-badge';
+const CC_IGNORED_BADGE_CLASS = 'rc-combo-ignored-badge';
+const CC_TOTAL_BADGE_CLASS = 'rc-combo-total-badge';
+const CC_BADGE_CONTAINER_CLASS = 'rc-combo-badge-container';
+const CC_MARK_ALL_READ_BUTTON_CLASS = 'rc-combo-mark-all-read-button';
+const CC_CLEAR_STORAGE_BUTTON_CLASS = 'rc-combo-clear-storage-button';
+const HIDE_CLASS_NATIVE = 'rc-combo-hide-native';
+const HIDE_CLASS_SCRIPT = 'rc-combo-hide-script';
+const HIDE_CLASS_TIMESTAMP = 'rc-combo-hide-timestamp';
+const HIDE_CLASS_ELAPSED = 'rc-combo-hide-elapsed';
+const HIDE_CLASS_IGNORED = 'rc-combo-hide-ignored';
+const HIDE_CLASS_TOTAL = 'rc-combo-hide-total';
+const LABEL_SPAN_ID_NATIVE = 'label-span-native';
+const LABEL_SPAN_ID_UNIGNORED = 'label-span-unignored';
+const LABEL_SPAN_ID_IGNORED = 'label-span-ignored';
+const LABEL_SPAN_ID_TIMESTAMP = 'label-span-timestamp';
+const LABEL_SPAN_ID_ELAPSED = 'label-span-elapsed';
+const LABEL_SPAN_ID_TOTAL = 'label-span-total';
+const ELAPSED_UPDATE_INTERVAL_MS = 60 * 1000;
+const TIMESTAMP_OVERLAY_UPDATE_INTERVAL_MS = 10 * 1000;
+
+const OBSERVER_TARGET_SELECTOR = 'div[class^="index_chat-list-content-left__"]';
+const CLICK_LISTENER_TARGET_SELECTOR = OBSERVER_TARGET_SELECTOR;
+const CHAT_TAB_SELECTOR_ALL = 'div[class^="index_chat-list-tab__"]:not([class*="index_chat-list-tab-add__"])';
+const NOC_CHAT_CLASS_PART = "index_chat-list-tab-noc__";
+const NOC_CHAT_ID = "noc-moderated";
+const ACTIVE_CHAT_TAB_SELECTOR = 'div[class*="index_chat-list-tab-active__"]';
+const UNREAD_COUNT_SELECTOR = 'div[class^="index_chat-list-unread-count__"]';
+const LAST_MESSAGE_CONTAINER_SELECTOR = 'div[class^="index_chat-list-last-message__"]';
+const CHAT_TITLE_CONTAINER_SELECTOR = ':scope > div:first-child';
+const CHAT_TITLE_CMR_LINK_SELECTOR = 'a[href*="/requests/"]';
+const CHAT_TITLE_DESC_SPAN_SELECTOR = 'span';
+const STATUS_ICON_SELECTOR = 'div[class^="index_tabStatusIcon__"] span.anticon';
+const TITLE_SELECTOR = 'a';
+
+const CUSTOM_PREVIEW_CLASS = 'rc-combo-custom-last-message';
