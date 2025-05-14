@@ -63,3 +63,140 @@ const STATUS_ICON_SELECTOR = 'div[class^="index_tabStatusIcon__"] span.anticon';
 const TITLE_SELECTOR = 'a';
 
 const CUSTOM_PREVIEW_CLASS = 'rc-combo-custom-last-message';
+
+
+
+const ALL_GM_STORAGE_KEYS = [ CC_STORAGE_COUNTS, VIS_NATIVE_KEY, VIS_SCRIPT_KEY, VIS_TIMESTAMP_KEY, VIS_ELAPSED_KEY, VIS_IGNORED_KEY, VIS_TOTAL_KEY, OVERLAY_POS_X_KEY, OVERLAY_POS_Y_KEY, SORTER_COLLAPSED_KEY, OVERLAY_SIZE_W_KEY, OVERLAY_SIZE_H_KEY ];
+
+// --- Debug Overlay Constants ---
+const DEBUG_OVERLAY_ID = 'rc-combo-debug-overlay';
+const DEBUG_LOG_CONTAINER_ID = 'rc-combo-debug-log-container';
+const MAX_DEBUG_LOG_ENTRIES = 100; // Max number of log lines in the debug overlay
+const DEBUG_LOG_TEXT_SNIPPET_LENGTH = 70; // Max length for text snippets in debug log
+
+// --- Global State ---
+let scriptChatCounts = {};
+let visualUpdateDebounceTimer = null;
+let chatListClickListenerAdded = false;
+let mainContainerElement = null;
+let pageObserver = null;
+let initializationScheduled = false;
+let visibilityState = { native: true, script: true, timestamp: true, elapsed: true, ignored: true, total: true };
+let elapsedUpdateIntervalId = null;
+let timestampOverlayUpdateIntervalId = null;
+let timestampOverlayElement = null;
+let debouncedSaveOverlaySize = null;
+const tabsToRecheck = new Map();
+let debugLogContainer = null; // For the new debug overlay
+
+// --- Logging ---
+const LOG_LEVELS = { DEBUG: 1, INFO: 2, WARN: 3, ERROR: 4, NONE: 5 };
+const CURRENT_CONSOLE_LOG_LEVEL = LOG_LEVELS[CC_CONSOLE_LOG_LEVEL] || LOG_LEVELS.INFO;
+function logEvent(level = 'INFO', message, data = undefined) {
+  const levelNum = LOG_LEVELS[level] || LOG_LEVELS.INFO;
+  if (levelNum >= CURRENT_CONSOLE_LOG_LEVEL && level !== 'NONE') {
+    const timestamp = new Date().toLocaleTimeString('en-US', { hour12: false });
+    const scriptNamePart = (GM_info?.script?.name || SCRIPT_ID).split(' v')[0];
+    const consoleArgs = [`%c[${scriptNamePart} @ ${timestamp}]%c ${message}`, 'font-weight: bold;', 'font-weight: normal;'];
+    if (data !== undefined) {
+      let logData = data;
+      try {
+        if (data instanceof Element || data instanceof Node) { logData = `<${data.tagName?.toLowerCase() || 'Node'}> Element/Node`; }
+        else if (data instanceof Event) { logData = `Event: ${data.type} on ${data.target?.tagName}`; }
+        else if (typeof data === 'object' && data !== null) { logData = JSON.parse(JSON.stringify(data)); }
+      } catch (e) { logData = "[Unserializable/Circular Object]"; }
+      consoleArgs.push(logData);
+    }
+    switch (level) {
+      case 'WARN': console.warn(...consoleArgs); break;
+      case 'ERROR': console.error(...consoleArgs); break;
+      case 'INFO': console.info(...consoleArgs); break;
+      case 'DEBUG': console.debug?.(...consoleArgs) || console.log(...consoleArgs); break;
+      default: console.log(...consoleArgs); break;
+    }
+  }
+}
+
+// --- Utility Functions ---
+function simpleDebounce(func, delay) { let timeout; return function(...args) { const context = this; clearTimeout(timeout); timeout = setTimeout(() => func.apply(context, args), delay); }; }
+function logTimestampDecision(chatId, context, decision, reason, oldState, newStateDetails) {
+  const oldTs = oldState ? (oldState.firstUnreadTimestamp ? new Date(oldState.firstUnreadTimestamp).toLocaleTimeString('en-US', { hour12: false }) : 'null') : 'N/A';
+  const newTsVal = newStateDetails && newStateDetails.firstUnreadTimestamp ? new Date(newStateDetails.firstUnreadTimestamp).toLocaleTimeString('en-US', { hour12: false }) : (newStateDetails && newStateDetails.firstUnreadTimestamp === null ? 'null' : 'N/A');
+  logEvent('DEBUG', `[TS_DEBUG] Chat [${chatId}] Ctx: ${context} | Decision: ${decision} | Reason: ${reason}`, {
+    old_count: oldState?.count, old_ignored_count: oldState?.ignoredCount, old_timestamp: oldTs,
+    old_last_text: (oldState?.lastText || "").substring(0,30) + ((oldState?.lastText || "").length > 30 ? "..." : ""),
+    old_last_activity: oldState?.lastActivityTimestamp ? new Date(oldState.lastActivityTimestamp).toLocaleTimeString() : 'N/A',
+    old_last_read_ts: oldState?.lastReadByScriptTimestamp ? new Date(oldState.lastReadByScriptTimestamp).toLocaleTimeString('en-US', {hour12:false, second:'2-digit', fractionalSecondDigits: 3}) : 'N/A',
+    old_last_seen_dom_text: (oldState?.lastSeenDomTextBeforeRead || "").substring(0,30) + ((oldState?.lastSeenDomTextBeforeRead || "").length > 30 ? "..." : ""),
+    current_text_if_applicable: newStateDetails?.currentText ? newStateDetails.currentText.replace(/\n/g, '\\n').substring(0,30) + (newStateDetails.currentText.length > 30 ? "..." : "") : "N/A",
+    new_count: newStateDetails?.count, new_ignored_count: newStateDetails?.ignoredCount,
+    new_total_count: newStateDetails?.totalCountSinceActive, final_timestamp_val: newTsVal,
+    new_last_activity: newStateDetails?.lastActivityTimestamp ? new Date(newStateDetails.lastActivityTimestamp).toLocaleTimeString() : 'N/A',
+    new_last_read_ts: newStateDetails?.lastReadByScriptTimestamp ? new Date(newStateDetails.lastReadByScriptTimestamp).toLocaleTimeString('en-US', {hour12:false, second:'2-digit', fractionalSecondDigits: 3}) : 'N/A',
+    new_last_seen_dom_text: (newStateDetails?.lastSeenDomTextBeforeRead || "").replace(/\n/g, '\\n').substring(0,30) + ((newStateDetails?.lastSeenDomTextBeforeRead || "").length > 30 ? "..." : ""),
+    full_old_state: oldState, full_new_details: newStateDetails
+  });
+}
+
+// --- Debug Overlay Functions ---
+function addDebugLogEntry(chatId, domContent, result) {
+    // Filter out log entries where the DOM content (message text) is empty or whitespace-only,
+    // as per user request to only show entries with actual message content in the debug overlay.
+    if ((domContent || "").trim() === "") {
+        return;
+    }
+
+    if (!debugLogContainer) return;
+
+    const timestamp = new Date().toLocaleTimeString('en-US', { hour12: false });
+    const logEntry = document.createElement('div');
+    logEntry.className = 'rc-combo-debug-log-entry';
+
+    // domContent is already confirmed to be non-empty (after trim) by the check above.
+    // So, (domContent || "") is effectively just domContent.
+    let processedDomContent = domContent.replace(/\n/g, '↵');
+    if (processedDomContent.length > DEBUG_LOG_TEXT_SNIPPET_LENGTH) {
+        processedDomContent = processedDomContent.substring(0, DEBUG_LOG_TEXT_SNIPPET_LENGTH) + "...";
+    }
+
+    logEntry.textContent = `[${timestamp}] - [${chatId || 'N/A'}] - "${processedDomContent}" - ${result}`;
+
+    debugLogContainer.appendChild(logEntry);
+
+    // Scroll to bottom
+    debugLogContainer.scrollTop = debugLogContainer.scrollHeight;
+
+    // Limit number of entries
+    while (debugLogContainer.childNodes.length > MAX_DEBUG_LOG_ENTRIES) {
+        debugLogContainer.removeChild(debugLogContainer.firstChild);
+    }
+}
+
+function createDebugOverlay() {
+    if (document.getElementById(DEBUG_OVERLAY_ID)) return;
+    logEvent('INFO', 'Creating debug log overlay...');
+    try {
+        const overlay = document.createElement('div');
+        overlay.id = DEBUG_OVERLAY_ID;
+
+        const header = document.createElement('div');
+        header.textContent = 'RC Combo Script - DOM Message Check Log (Non-Empty Only)';
+        header.style.fontWeight = 'bold';
+        header.style.padding = '5px';
+        header.style.backgroundColor = '#333';
+        header.style.color = 'white';
+        header.style.borderTopLeftRadius = '5px';
+        header.style.borderTopRightRadius = '5px';
+
+        debugLogContainer = document.createElement('div');
+        debugLogContainer.id = DEBUG_LOG_CONTAINER_ID;
+
+        overlay.appendChild(header);
+        overlay.appendChild(debugLogContainer);
+        document.body.appendChild(overlay);
+        logEvent('INFO', 'Debug log overlay created.');
+    } catch (error) {
+        logEvent('ERROR', 'Failed to create debug log overlay', error);
+        debugLogContainer = null;
+    }
+}
